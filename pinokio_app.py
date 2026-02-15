@@ -22,7 +22,21 @@ DEFAULT_GEMMA_DIRNAME = "gemma-3-12b-it-qat-q4_0-unquantized"
 LTX_REPO = "Lightricks/LTX-2"
 JUSTDUBIT_REPO = "justdubit/justdubit"
 GEMMA_REPO = "google/gemma-3-12b-it-qat-q4_0-unquantized"
-WAN_LTX2_DIR = Path(r"C:\pinokio\api\wan.git\app\models\ltx2")
+
+WAN_MODELS_LTX2_DIR = Path(r"C:\pinokio\api\wan.git\app\models\ltx2")
+WAN_CKPTS_DIR = Path(r"C:\pinokio\api\wan.git\app\ckpts")
+WAN_LORAS_LTX2_DIR = Path(r"C:\pinokio\api\wan.git\app\loras\ltx2")
+
+SHARED_MODEL_FILE_DIRS = [
+    WAN_MODELS_LTX2_DIR,
+    WAN_CKPTS_DIR,
+    WAN_LORAS_LTX2_DIR,
+]
+
+SHARED_GEMMA_DIRS = [
+    WAN_MODELS_LTX2_DIR / DEFAULT_GEMMA_DIRNAME,
+    WAN_CKPTS_DIR / DEFAULT_GEMMA_DIRNAME,
+]
 
 
 def _load_gradio():
@@ -85,6 +99,39 @@ def _resolve_model_input_path(raw_path: str, expected_filename: str) -> Path:
         return resolved / expected_filename
 
     return resolved
+
+
+def _maybe_use_shared_model_file(
+    path: Path,
+    *,
+    expected_filename: str,
+    label: str,
+    logs: list[str],
+) -> Path:
+    if path.exists():
+        return path
+    if path.name != expected_filename:
+        return path
+
+    for shared_dir in SHARED_MODEL_FILE_DIRS:
+        candidate = shared_dir / expected_filename
+        if candidate.exists():
+            logs.append(f"[reuse] {label}: {candidate}")
+            return candidate
+    return path
+
+
+def _maybe_use_shared_gemma_dir(path: Path, logs: list[str]) -> Path:
+    if path.exists():
+        return path
+    if path.name != DEFAULT_GEMMA_DIRNAME:
+        return path
+
+    for candidate in SHARED_GEMMA_DIRS:
+        if candidate.exists() and candidate.is_dir() and any(candidate.iterdir()):
+            logs.append(f"[reuse] Gemma root: {candidate}")
+            return candidate
+    return path
 
 
 def _hf_token_or_none(hf_token: str) -> str | None:
@@ -256,16 +303,45 @@ def run_pipeline(
     upsampler = _resolve_model_input_path(spatial_upsampler_path, DEFAULT_UPSAMPLER_FILENAME)
     justdubit_lora = _resolve_model_input_path(justdubit_lora_path, DEFAULT_JUSTDUBIT_LORA_FILENAME)
 
-    download_logs: list[str] = []
+    shared_reuse_logs: list[str] = []
+    checkpoint = _maybe_use_shared_model_file(
+        checkpoint,
+        expected_filename=DEFAULT_CHECKPOINT_FILENAME,
+        label="LTX-2 AV checkpoint",
+        logs=shared_reuse_logs,
+    )
+    distilled_lora = _maybe_use_shared_model_file(
+        distilled_lora,
+        expected_filename=DEFAULT_DISTILLED_LORA_FILENAME,
+        label="Distilled LoRA",
+        logs=shared_reuse_logs,
+    )
+    upsampler = _maybe_use_shared_model_file(
+        upsampler,
+        expected_filename=DEFAULT_UPSAMPLER_FILENAME,
+        label="Spatial upsampler",
+        logs=shared_reuse_logs,
+    )
+    justdubit_lora = _maybe_use_shared_model_file(
+        justdubit_lora,
+        expected_filename=DEFAULT_JUSTDUBIT_LORA_FILENAME,
+        label="JustDubit LoRA",
+        logs=shared_reuse_logs,
+    )
+    gemma = _maybe_use_shared_gemma_dir(gemma, shared_reuse_logs)
+
+    download_logs: list[str] = list(shared_reuse_logs)
     if auto_download_models:
         try:
-            download_logs = _ensure_required_assets(
-                checkpoint=checkpoint,
-                gemma_root=gemma,
-                distilled_lora=distilled_lora,
-                spatial_upsampler=upsampler,
-                justdubit_lora=justdubit_lora,
-                hf_token=hf_token,
+            download_logs.extend(
+                _ensure_required_assets(
+                    checkpoint=checkpoint,
+                    gemma_root=gemma,
+                    distilled_lora=distilled_lora,
+                    spatial_upsampler=upsampler,
+                    justdubit_lora=justdubit_lora,
+                    hf_token=hf_token,
+                )
             )
         except Exception as exc:  # noqa: BLE001
             return None, "\n".join(download_logs + [str(exc)]).strip()
@@ -345,7 +421,7 @@ def run_pipeline(
     )
     sections = []
     if download_logs:
-        sections.append("\n".join(download_logs))
+        sections.append("\n".join(dict.fromkeys(download_logs)))
     sections.append(f"$ {quoted_cmd}\n\n{process.stdout}\n{process.stderr}".strip())
     logs = "\n\n".join(section for section in sections if section).strip()
 
@@ -359,10 +435,24 @@ def run_pipeline(
 
 def build_ui(gr):
     with gr.Blocks(title="JustDubit (Pinokio)") as demo:
-        default_distilled = str(
-            WAN_LTX2_DIR / DEFAULT_DISTILLED_LORA_FILENAME
-            if (WAN_LTX2_DIR / DEFAULT_DISTILLED_LORA_FILENAME).exists()
-            else f"models/{DEFAULT_DISTILLED_LORA_FILENAME}"
+        if (WAN_MODELS_LTX2_DIR / DEFAULT_DISTILLED_LORA_FILENAME).exists():
+            default_distilled = str(WAN_MODELS_LTX2_DIR / DEFAULT_DISTILLED_LORA_FILENAME)
+        elif (WAN_LORAS_LTX2_DIR / DEFAULT_DISTILLED_LORA_FILENAME).exists():
+            default_distilled = str(WAN_LORAS_LTX2_DIR / DEFAULT_DISTILLED_LORA_FILENAME)
+        elif WAN_MODELS_LTX2_DIR.exists():
+            default_distilled = str(WAN_MODELS_LTX2_DIR)
+        else:
+            default_distilled = f"models/{DEFAULT_DISTILLED_LORA_FILENAME}"
+
+        default_spatial_upsampler = str(
+            WAN_CKPTS_DIR / DEFAULT_UPSAMPLER_FILENAME
+            if (WAN_CKPTS_DIR / DEFAULT_UPSAMPLER_FILENAME).exists()
+            else f"models/{DEFAULT_UPSAMPLER_FILENAME}"
+        )
+        default_gemma_root = str(
+            WAN_CKPTS_DIR / DEFAULT_GEMMA_DIRNAME
+            if (WAN_CKPTS_DIR / DEFAULT_GEMMA_DIRNAME).exists()
+            else f"models/{DEFAULT_GEMMA_DIRNAME}"
         )
 
         gr.Markdown(
@@ -384,7 +474,7 @@ def build_ui(gr):
             )
             gemma_root = gr.Textbox(
                 label="Gemma root directory",
-                value="models/gemma-3-12b-it-qat-q4_0-unquantized",
+                value=default_gemma_root,
             )
 
         with gr.Row():
@@ -394,7 +484,7 @@ def build_ui(gr):
             )
             spatial_upsampler_path = gr.Textbox(
                 label="Spatial upsampler",
-                value="models/ltx-2-spatial-upscaler-x2-1.0.safetensors",
+                value=default_spatial_upsampler,
             )
 
         justdubit_lora_path = gr.Textbox(
