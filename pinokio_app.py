@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -12,6 +13,16 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+DEFAULT_CHECKPOINT_FILENAME = "ltx-2-19b-dev.safetensors"
+DEFAULT_DISTILLED_LORA_FILENAME = "ltx-2-19b-distilled-lora-384.safetensors"
+DEFAULT_UPSAMPLER_FILENAME = "ltx-2-spatial-upscaler-x2-1.0.safetensors"
+DEFAULT_JUSTDUBIT_LORA_FILENAME = "ltx-2-19b-ic-lora-lipdubbing.safetensors"
+DEFAULT_GEMMA_DIRNAME = "gemma-3-12b-it-qat-q4_0-unquantized"
+
+LTX_REPO = "Lightricks/LTX-2"
+JUSTDUBIT_REPO = "justdubit/justdubit"
+GEMMA_REPO = "google/gemma-3-12b-it-qat-q4_0-unquantized"
+
 
 def _load_gradio():
     try:
@@ -20,7 +31,20 @@ def _load_gradio():
     except ModuleNotFoundError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio"])
         import gradio as gr  # noqa: PLC0415
+
         return gr
+
+
+def _load_hf_hub():
+    try:
+        import huggingface_hub as hf  # noqa: PLC0415
+
+        return hf
+    except ModuleNotFoundError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "huggingface_hub"])
+        import huggingface_hub as hf  # noqa: PLC0415
+
+        return hf
 
 
 def _resolve_path(raw_path: str) -> Path:
@@ -49,6 +73,137 @@ def _resolve_source_video(source_video_path: str, uploaded_video: str | None) ->
     return _require_existing_path("Source video path", source_video_path, expect_dir=False)
 
 
+def _hf_token_or_none(hf_token: str) -> str | None:
+    token = hf_token.strip() if hf_token else ""
+    if token:
+        return token
+    env_token = os.getenv("HF_TOKEN", "").strip()
+    return env_token or None
+
+
+def _format_download_error(repo_id: str, target: str, exc: Exception) -> str:
+    base = f"Failed downloading {target} from https://huggingface.co/{repo_id}.\nError: {exc}"
+    hint = (
+        "If the repo is gated, accept its terms on Hugging Face and provide an HF token "
+        "in the UI (or set HF_TOKEN in environment)."
+    )
+    return f"{base}\n{hint}"
+
+
+def _download_model_file_if_missing(
+    *,
+    path: Path,
+    expected_filename: str,
+    repo_id: str,
+    label: str,
+    hf_token: str | None,
+    logs: list[str],
+) -> None:
+    if path.exists():
+        logs.append(f"[ok] {label}: {path}")
+        return
+
+    if path.name != expected_filename:
+        raise ValueError(
+            f"{label} path is missing and has non-default filename '{path.name}'. "
+            f"Use filename '{expected_filename}' for auto-download or provide the file manually."
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    logs.append(f"[download] {label}: {repo_id}/{expected_filename}")
+    hf = _load_hf_hub()
+    try:
+        hf.hf_hub_download(
+            repo_id=repo_id,
+            filename=expected_filename,
+            local_dir=str(path.parent),
+            token=hf_token,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(_format_download_error(repo_id, expected_filename, exc)) from exc
+
+    if not path.exists():
+        raise RuntimeError(f"Download finished but file is still missing: {path}")
+    logs.append(f"[done] {label}: {path}")
+
+
+def _download_gemma_if_missing(path: Path, hf_token: str | None, logs: list[str]) -> None:
+    if path.exists() and path.is_dir() and any(path.iterdir()):
+        logs.append(f"[ok] Gemma root: {path}")
+        return
+
+    if path.name != DEFAULT_GEMMA_DIRNAME:
+        raise ValueError(
+            f"Gemma root is missing and has non-default directory name '{path.name}'. "
+            f"Use '{DEFAULT_GEMMA_DIRNAME}' for auto-download or provide the directory manually."
+        )
+
+    path.mkdir(parents=True, exist_ok=True)
+    logs.append(f"[download] Gemma text encoder: {GEMMA_REPO}")
+    hf = _load_hf_hub()
+    try:
+        hf.snapshot_download(
+            repo_id=GEMMA_REPO,
+            local_dir=str(path),
+            token=hf_token,
+            resume_download=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(_format_download_error(GEMMA_REPO, DEFAULT_GEMMA_DIRNAME, exc)) from exc
+
+    if not any(path.iterdir()):
+        raise RuntimeError(f"Gemma download finished but directory is empty: {path}")
+    logs.append(f"[done] Gemma root: {path}")
+
+
+def _ensure_required_assets(
+    *,
+    checkpoint: Path,
+    gemma_root: Path,
+    distilled_lora: Path,
+    spatial_upsampler: Path,
+    justdubit_lora: Path,
+    hf_token: str,
+) -> list[str]:
+    logs: list[str] = []
+    token = _hf_token_or_none(hf_token)
+
+    _download_model_file_if_missing(
+        path=checkpoint,
+        expected_filename=DEFAULT_CHECKPOINT_FILENAME,
+        repo_id=LTX_REPO,
+        label="LTX-2 AV checkpoint",
+        hf_token=token,
+        logs=logs,
+    )
+    _download_model_file_if_missing(
+        path=distilled_lora,
+        expected_filename=DEFAULT_DISTILLED_LORA_FILENAME,
+        repo_id=LTX_REPO,
+        label="Distilled LoRA",
+        hf_token=token,
+        logs=logs,
+    )
+    _download_model_file_if_missing(
+        path=spatial_upsampler,
+        expected_filename=DEFAULT_UPSAMPLER_FILENAME,
+        repo_id=LTX_REPO,
+        label="Spatial upsampler",
+        hf_token=token,
+        logs=logs,
+    )
+    _download_model_file_if_missing(
+        path=justdubit_lora,
+        expected_filename=DEFAULT_JUSTDUBIT_LORA_FILENAME,
+        repo_id=JUSTDUBIT_REPO,
+        label="JustDubit LoRA",
+        hf_token=token,
+        logs=logs,
+    )
+    _download_gemma_if_missing(gemma_root, token, logs)
+    return logs
+
+
 def run_pipeline(
     checkpoint_path: str,
     gemma_root: str,
@@ -67,13 +222,46 @@ def run_pipeline(
     cfg_guidance_scale: float,
     frame_rate: float,
     seed: int,
+    auto_download_models: bool,
+    hf_token: str,
 ) -> tuple[str | None, str]:
+    required_paths = [
+        ("Checkpoint path", checkpoint_path),
+        ("Gemma root", gemma_root),
+        ("Distilled LoRA path", distilled_lora_path),
+        ("Spatial upsampler path", spatial_upsampler_path),
+        ("JustDubit LoRA path", justdubit_lora_path),
+    ]
+    for label, value in required_paths:
+        if not value or not value.strip():
+            return None, f"{label} is required."
+
+    checkpoint = _resolve_path(checkpoint_path.strip())
+    gemma = _resolve_path(gemma_root.strip())
+    distilled_lora = _resolve_path(distilled_lora_path.strip())
+    upsampler = _resolve_path(spatial_upsampler_path.strip())
+    justdubit_lora = _resolve_path(justdubit_lora_path.strip())
+
+    download_logs: list[str] = []
+    if auto_download_models:
+        try:
+            download_logs = _ensure_required_assets(
+                checkpoint=checkpoint,
+                gemma_root=gemma,
+                distilled_lora=distilled_lora,
+                spatial_upsampler=upsampler,
+                justdubit_lora=justdubit_lora,
+                hf_token=hf_token,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return None, "\n".join(download_logs + [str(exc)]).strip()
+
     try:
-        checkpoint = _require_existing_path("Checkpoint path", checkpoint_path, expect_dir=False)
-        gemma = _require_existing_path("Gemma root", gemma_root, expect_dir=True)
-        distilled_lora = _require_existing_path("Distilled LoRA path", distilled_lora_path, expect_dir=False)
-        upsampler = _require_existing_path("Spatial upsampler path", spatial_upsampler_path, expect_dir=False)
-        justdubit_lora = _require_existing_path("JustDubit LoRA path", justdubit_lora_path, expect_dir=False)
+        checkpoint = _require_existing_path("Checkpoint path", str(checkpoint), expect_dir=False)
+        gemma = _require_existing_path("Gemma root", str(gemma), expect_dir=True)
+        distilled_lora = _require_existing_path("Distilled LoRA path", str(distilled_lora), expect_dir=False)
+        upsampler = _require_existing_path("Spatial upsampler path", str(upsampler), expect_dir=False)
+        justdubit_lora = _require_existing_path("JustDubit LoRA path", str(justdubit_lora), expect_dir=False)
         source_video = _resolve_source_video(source_video_path, uploaded_video)
     except ValueError as exc:
         return None, str(exc)
@@ -141,7 +329,11 @@ def run_pipeline(
         capture_output=True,
         text=True,
     )
-    logs = f"$ {quoted_cmd}\n\n{process.stdout}\n{process.stderr}".strip()
+    sections = []
+    if download_logs:
+        sections.append("\n".join(download_logs))
+    sections.append(f"$ {quoted_cmd}\n\n{process.stdout}\n{process.stderr}".strip())
+    logs = "\n\n".join(section for section in sections if section).strip()
 
     if process.returncode != 0:
         return None, logs
@@ -237,6 +429,17 @@ def build_ui(gr):
             frame_rate = gr.Slider(label="Frame rate", minimum=8, maximum=60, value=25, step=1)
             seed = gr.Number(label="Seed", value=42, precision=0)
 
+        with gr.Row():
+            auto_download_models = gr.Checkbox(
+                label="Auto-download missing models",
+                value=True,
+            )
+            hf_token = gr.Textbox(
+                label="Hugging Face token (optional)",
+                type="password",
+                placeholder="hf_...",
+            )
+
         run_button = gr.Button("Run Dubbing", variant="primary")
         output_video = gr.Video(label="Output video")
         logs = gr.Textbox(label="Logs", lines=20, max_lines=30)
@@ -261,6 +464,8 @@ def build_ui(gr):
                 cfg_guidance_scale,
                 frame_rate,
                 seed,
+                auto_download_models,
+                hf_token,
             ],
             outputs=[output_video, logs],
         )
