@@ -8,11 +8,19 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-import gradio as gr
-
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_gradio():
+    try:
+        import gradio as gr  # noqa: PLC0415
+        return gr
+    except ModuleNotFoundError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio"])
+        import gradio as gr  # noqa: PLC0415
+        return gr
 
 
 def _resolve_path(raw_path: str) -> Path:
@@ -143,7 +151,7 @@ def run_pipeline(
     return str(output_path), logs
 
 
-def build_ui() -> gr.Blocks:
+def build_ui(gr):
     with gr.Blocks(title="JustDubit (Pinokio)") as demo:
         gr.Markdown(
             """
@@ -269,7 +277,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    ui = build_ui()
+    gr = _load_gradio()
+    ui = build_ui(gr)
     ui.queue(max_size=2).launch(
         server_name=args.host,
         server_port=args.port,
