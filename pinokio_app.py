@@ -22,6 +22,7 @@ DEFAULT_GEMMA_DIRNAME = "gemma-3-12b-it-qat-q4_0-unquantized"
 LTX_REPO = "Lightricks/LTX-2"
 JUSTDUBIT_REPO = "justdubit/justdubit"
 GEMMA_REPO = "google/gemma-3-12b-it-qat-q4_0-unquantized"
+WAN_LTX2_DIR = Path(r"C:\pinokio\api\wan.git\app\models\ltx2")
 
 
 def _load_gradio():
@@ -71,6 +72,19 @@ def _resolve_source_video(source_video_path: str, uploaded_video: str | None) ->
     if uploaded_video and uploaded_video.strip():
         return _require_existing_path("Uploaded source video", uploaded_video, expect_dir=False)
     return _require_existing_path("Source video path", source_video_path, expect_dir=False)
+
+
+def _resolve_model_input_path(raw_path: str, expected_filename: str) -> Path:
+    value = raw_path.strip()
+    resolved = _resolve_path(value)
+
+    if resolved.name.lower().endswith(".safetensors"):
+        return resolved
+
+    if resolved.suffix == "" or resolved.is_dir():
+        return resolved / expected_filename
+
+    return resolved
 
 
 def _hf_token_or_none(hf_token: str) -> str | None:
@@ -236,11 +250,11 @@ def run_pipeline(
         if not value or not value.strip():
             return None, f"{label} is required."
 
-    checkpoint = _resolve_path(checkpoint_path.strip())
+    checkpoint = _resolve_model_input_path(checkpoint_path, DEFAULT_CHECKPOINT_FILENAME)
     gemma = _resolve_path(gemma_root.strip())
-    distilled_lora = _resolve_path(distilled_lora_path.strip())
-    upsampler = _resolve_path(spatial_upsampler_path.strip())
-    justdubit_lora = _resolve_path(justdubit_lora_path.strip())
+    distilled_lora = _resolve_model_input_path(distilled_lora_path, DEFAULT_DISTILLED_LORA_FILENAME)
+    upsampler = _resolve_model_input_path(spatial_upsampler_path, DEFAULT_UPSAMPLER_FILENAME)
+    justdubit_lora = _resolve_model_input_path(justdubit_lora_path, DEFAULT_JUSTDUBIT_LORA_FILENAME)
 
     download_logs: list[str] = []
     if auto_download_models:
@@ -345,6 +359,12 @@ def run_pipeline(
 
 def build_ui(gr):
     with gr.Blocks(title="JustDubit (Pinokio)") as demo:
+        default_distilled = str(
+            WAN_LTX2_DIR / DEFAULT_DISTILLED_LORA_FILENAME
+            if (WAN_LTX2_DIR / DEFAULT_DISTILLED_LORA_FILENAME).exists()
+            else f"models/{DEFAULT_DISTILLED_LORA_FILENAME}"
+        )
+
         gr.Markdown(
             """
             # JustDubit
@@ -370,7 +390,7 @@ def build_ui(gr):
         with gr.Row():
             distilled_lora_path = gr.Textbox(
                 label="Distilled LoRA",
-                value="models/ltx-2-19b-distilled-lora-384.safetensors",
+                value=default_distilled,
             )
             spatial_upsampler_path = gr.Textbox(
                 label="Spatial upsampler",
