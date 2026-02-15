@@ -5,8 +5,7 @@ module.exports = {
       params: {
         path: ".",
         message: [
-          "uv python install 3.12",
-          "uv venv --python 3.12 env",
+          "python -m venv env",
         ],
       },
     },
@@ -26,9 +25,9 @@ module.exports = {
         venv: "env",
         path: ".",
         message: [
-          "uv pip install --upgrade pip setuptools wheel",
-          "uv pip install opencv-python gradio",
-          "uv pip install -e packages/ltx-core -e packages/ltx-pipelines",
+          "python -m pip install --upgrade pip setuptools wheel",
+          "python -m pip install opencv-python gradio",
+          "python -m pip install -e packages/ltx-core -e packages/ltx-pipelines",
         ],
       },
     },
